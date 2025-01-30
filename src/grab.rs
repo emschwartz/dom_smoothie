@@ -35,6 +35,7 @@ impl Readability {
 
             for node in descendants.iter().filter(|n| n.is_element()) {
                 let Some(node_name) = node.node_name() else {
+                    eprintln!("UNREACHABLE node.html: {:?}", node.html());
                     unreachable!()
                 };
 
@@ -294,7 +295,7 @@ fn is_unlikely_candidate(node: &Node, match_string: &str) -> bool {
         return false;
     }
 
-    // TODO: There is also a chance that `unlikely` block may contain `likely` block. 
+    // TODO: There is also a chance that `unlikely` block may contain `likely` block.
     // It may be checked in place instead of starting a new loop iteration.
 
     if has_ancestor_tag::<NodePredicate>(node, "table", Some(0), None) {
@@ -438,6 +439,7 @@ fn handle_top_candidate(tc: &Node, article_content: &Node) {
     }
     // Keep potential top candidate's parent node to try to get text direction of it later.
     let Some(tc_parent) = tc.parent() else {
+        eprintln!("UNREACHABLE tc.parent(): {:?}", tc.parent());
         unreachable!()
     };
 
@@ -651,7 +653,7 @@ mod tests {
         <html>
             <head><title>Test</title></head>
             <body>
-                 <p hidden>This paragraph should be hidden.</p> 
+                 <p hidden>This paragraph should be hidden.</p>
                  <p aria-hidden="true">This paragraph should be hidden.</p>
                  <p style="display:none">This paragraph should be hidden.</p>
                  <p style="visibility:hidden">This paragraph should be hidden.</p>
