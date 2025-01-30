@@ -872,6 +872,8 @@ impl Readability {
 
         for node in class_sel.nodes().iter() {
             let Some(class_string) = node.attr("class") else {
+                dbg!(&node.html());
+                dbg!(&sel.html());
                 unreachable!();
             };
             let classes_to_remove = class_string
@@ -915,6 +917,8 @@ impl Readability {
         if let Some(base_url) = base_url {
             for a in root_sel.select(url_sel).nodes().iter() {
                 let Some(href) = a.attr("href") else {
+                    dbg!(&a.html());
+                    dbg!(&root_sel.html());
                     unreachable!();
                 };
                 let abs_url = to_absolute_url(&href, &base_url);
