@@ -440,6 +440,11 @@ fn handle_top_candidate(tc: &Node, article_content: &Node) {
     // Keep potential top candidate's parent node to try to get text direction of it later.
     let Some(tc_parent) = tc.parent() else {
         eprintln!("UNREACHABLE tc.parent(): {:?}", tc.parent());
+        eprintln!("UNREACHABLE tc.html(): {:?}", tc.html());
+        eprintln!(
+            "UNREACHABLE article_content.html(): {:?}",
+            article_content.html()
+        );
         unreachable!()
     };
 
