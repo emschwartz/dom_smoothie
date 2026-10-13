@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use foldhash::HashMap;
 use unicode_segmentation::UnicodeSegmentation;
 
-use dom_query::{NodeId, NodeRef, Selection};
+use dom_query::{local_name, NodeData, NodeId, NodeRef, Selection};
 
 use tendril::StrTendril;
 
@@ -108,36 +108,32 @@ pub(crate) fn normalize_spaces(text: &str) -> String {
     result
 }
 
-pub(crate) fn link_density_fn<F>(node: &NodeRef, char_count: Option<usize>, mut count_fn: F) -> f32
-where
-    F: FnMut(&NodeRef) -> usize,
-{
+/// Weight of a link's text in the link density: in-page anchors count for less.
+pub(crate) fn link_coeff(href: &str) -> f32 {
+    if href.len() > 1 && href.starts_with('#') {
+        0.3
+    } else {
+        1.0
+    }
+}
+
+pub(crate) fn link_density(node: &NodeRef, char_count: Option<usize>) -> f32 {
     let mut link_length = 0f32;
 
     for a in node.find_descendants("a") {
-        let href = a.attr_or("href", "");
-        let coeff = if href.len() > 1 && href.starts_with('#') {
-            0.3
-        } else {
-            1.0
-        };
-        link_length += count_fn(&a) as f32 * coeff;
+        link_length += a.normalized_char_count() as f32 * link_coeff(&a.attr_or("href", ""));
     }
 
     if link_length == 0.0 {
         return 0.0;
     }
 
-    let text_length = char_count.unwrap_or_else(|| count_fn(node)) as f32;
+    let text_length = char_count.unwrap_or_else(|| node.normalized_char_count()) as f32;
     if text_length == 0.0 {
         return 0.0;
     }
 
     link_length / text_length
-}
-
-pub(crate) fn link_density(node: &NodeRef, char_count: Option<usize>) -> f32 {
-    link_density_fn(node, char_count, |n| n.normalized_char_count())
 }
 
 /// Returns the child element if the node contains exactly one element child with the given tag
@@ -281,17 +277,125 @@ impl<'a> BytePatternCheck<'a> {
     }
 }
 
-#[derive(Default)]
-pub(crate) struct CharCounterCache {
-    inner: HashMap<NodeId, usize>,
+/// `normalized_char_count` and [`link_density`] of every node under a root,
+/// from one bottom-up pass instead of a subtree walk per lookup.
+pub(crate) struct SubtreeStats {
+    stats: HashMap<NodeId, TextStat>,
 }
 
-impl CharCounterCache {
-    pub(crate) fn char_count(&mut self, node: &NodeRef) -> usize {
-        *self
-            .inner
-            .entry(node.id)
-            .or_insert_with(|| node.normalized_char_count())
+#[derive(Clone, Copy, Default)]
+struct TextStat {
+    chars: u32,
+    /// Weighted chars of the `<a>` descendants, as `link_density` sums them.
+    link_chars: f32,
+    has_text: bool,
+    leading_ws: bool,
+    trailing_ws: bool,
+}
+
+impl TextStat {
+    fn of_text(text: &str) -> Self {
+        let Some(first) = text.chars().next() else {
+            return Self::default();
+        };
+        let mut chars = 0u32;
+        let mut prev_ws = true;
+        for c in text.chars() {
+            let ws = c.is_whitespace();
+            if !(prev_ws && ws) {
+                chars += 1;
+            }
+            prev_ws = ws;
+        }
+        if prev_ws && chars > 0 {
+            chars -= 1;
+        }
+        Self {
+            chars,
+            has_text: true,
+            leading_ws: first.is_whitespace(),
+            trailing_ws: prev_ws,
+            ..Self::default()
+        }
+    }
+
+    /// `self`'s text followed by `next`'s, in document order.
+    fn then(self, next: Self) -> Self {
+        let link_chars = self.link_chars + next.link_chars;
+        let text = if !self.has_text {
+            next
+        } else if !next.has_text {
+            self
+        } else {
+            // text on both sides of the boundary keeps one space between them
+            let sep = u32::from(
+                self.chars > 0 && next.chars > 0 && (self.trailing_ws || next.leading_ws),
+            );
+            Self {
+                chars: self.chars + next.chars + sep,
+                has_text: true,
+                leading_ws: self.leading_ws,
+                trailing_ws: next.trailing_ws,
+                ..Self::default()
+            }
+        };
+        Self { link_chars, ..text }
+    }
+}
+
+impl SubtreeStats {
+    pub(crate) fn build(root: &NodeRef) -> Self {
+        let nodes: Vec<NodeRef> = std::iter::once(*root)
+            .chain(root.descendants_it())
+            .collect();
+        let mut stats: HashMap<NodeId, TextStat> =
+            HashMap::with_capacity_and_hasher(nodes.len(), foldhash::fast::RandomState::default());
+        // Reverse pre-order: a node's descendants are folded in before the node itself,
+        // and siblings arrive last-to-first, which `then` turns back into document order.
+        for node in nodes.iter().rev() {
+            // a text node's own stats; an `<a>` reports its link weight for the parent
+            let (text, coeff) = node.query_or((None, None), |tree_node| match &tree_node.data {
+                NodeData::Text { contents } => (Some(TextStat::of_text(contents)), None),
+                NodeData::Element(el) if el.name.local == local_name!("a") => {
+                    let href = el
+                        .attrs
+                        .iter()
+                        .find(|a| a.name.local == local_name!("href"))
+                        .map_or("", |a| a.value.as_ref());
+                    (None, Some(link_coeff(href)))
+                }
+                _ => (None, None),
+            });
+            if let Some(text) = text {
+                stats.insert(node.id, text);
+            }
+            if node.id == root.id {
+                break;
+            }
+            if let Some(parent) = node.parent() {
+                let mut child = stats.get(&node.id).copied().unwrap_or_default();
+                if let Some(coeff) = coeff {
+                    child.link_chars += child.chars as f32 * coeff;
+                }
+                let acc = stats.entry(parent.id).or_default();
+                *acc = child.then(*acc);
+            }
+        }
+        Self { stats }
+    }
+
+    pub(crate) fn char_count(&self, node: &NodeRef) -> usize {
+        self.stats.get(&node.id).map_or(0, |s| s.chars as usize)
+    }
+
+    pub(crate) fn link_density(&self, node: &NodeRef) -> f32 {
+        let Some(s) = self.stats.get(&node.id) else {
+            return 0.0;
+        };
+        if s.link_chars == 0.0 || s.chars == 0 {
+            return 0.0;
+        }
+        s.link_chars / s.chars as f32
     }
 }
 
@@ -299,6 +403,43 @@ impl CharCounterCache {
 mod tests {
 
     use super::*;
+
+    // `SubtreeStats` must agree with the per-node walks it replaces.
+    #[test]
+    fn test_subtree_stats_match_per_node_walks() {
+        use dom_query::Document;
+        let mut pages = 0;
+        for entry in std::fs::read_dir("test-pages/ok").unwrap() {
+            let path = entry.unwrap().path().join("source.html");
+            let html = std::fs::read_to_string(&path).unwrap();
+            pages += 1;
+            let doc = Document::from(html);
+            let body = doc.select_single("body");
+            let body = body.nodes().first().unwrap();
+            let stats = SubtreeStats::build(body);
+            for node in std::iter::once(*body).chain(body.descendants_it()) {
+                if !node.is_element() {
+                    continue;
+                }
+                assert_eq!(
+                    stats.char_count(&node),
+                    node.normalized_char_count(),
+                    "char count of {:?} in {}",
+                    node.node_name(),
+                    path.display()
+                );
+                let expected = link_density(&node, None);
+                let got = stats.link_density(&node);
+                assert!(
+                    (got - expected).abs() <= 1e-5 * expected.max(1.0),
+                    "link density of {:?} in {}: {got} vs {expected}",
+                    node.node_name(),
+                    path.display()
+                );
+            }
+        }
+        assert!(pages > 0);
+    }
 
     const FLOAT_TOLERANCE: f64 = 0.00001;
 

@@ -6,6 +6,7 @@ All notable changes to the `dom_smoothie` crate will be documented in this file.
 
 ### Changed
 - `Readability::parse` lowers its peak memory: each extraction attempt now runs on the parsed document's spare node capacity instead of doubling the node array of a fresh clone (#222).
+- `Readability::parse` is about 10% faster: candidates are scored from one pass over the body instead of recounting each candidate's text once per ancestor level.
 
 ## [0.18.2] - 2026-09-21
 

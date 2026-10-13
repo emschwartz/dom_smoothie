@@ -1,4 +1,3 @@
-use dom_query::Tree;
 use foldhash::{HashMap, HashSet};
 use std::vec;
 
@@ -89,7 +88,7 @@ impl Readability {
     ) -> Option<NodeRef<'a>> {
         let tree = body_node.tree;
         let weigh_class = flags.contains(GrabFlags::WeightClasses);
-        let top_candidates = score_elements(elements_to_score, tree, &self.config, flags);
+        let top_candidates = score_elements(elements_to_score, body_node, &self.config, flags);
 
         let mut top_candidate = top_candidates.first().copied();
 
@@ -233,17 +232,18 @@ fn has_child_block_element(node: &NodeRef) -> bool {
 
 fn score_elements<'a>(
     elements_to_score: &[NodeRef<'a>],
-    tree: &'a Tree,
+    body_node: &'a NodeRef,
     cfg: &Config,
     flags: &FlagSet<GrabFlags>,
 ) -> Vec<NodeRef<'a>> {
+    let tree = body_node.tree;
+    let stats = SubtreeStats::build(body_node);
     let mut score_map: HashMap<NodeId, f32> = HashMap::default();
     // Preserves the initial order of candidates to ensure deterministic tie-breaking.
     let mut candidate_order: Vec<NodeId> = Vec::new();
-    let mut cc_cache = CharCounterCache::default();
 
     for element in elements_to_score {
-        let content_len = cc_cache.char_count(element);
+        let content_len = stats.char_count(element);
         if content_len < 25 {
             continue;
         }
@@ -293,7 +293,7 @@ fn score_elements<'a>(
             let candidate = NodeRef::new(node_id, tree);
             // Skipping adjustment of low score
             let score = if base_score > cfg.min_score_to_adjust {
-                base_score * (1.0 - link_density_fn(&candidate, None, |n| cc_cache.char_count(n)))
+                base_score * (1.0 - stats.link_density(&candidate))
             } else {
                 base_score
             };
@@ -665,7 +665,7 @@ mod tests {
         let elements = collect_elements_to_score(&body, true, &Metadata::default());
         let cfg = Config::default();
         let flags: FlagSet<GrabFlags> = FlagSet::full();
-        let top = score_elements(&elements, body.tree, &cfg, &flags);
+        let top = score_elements(&elements, &body, &cfg, &flags);
         let divs: Vec<String> = top
             .iter()
             .map(|n| n.attr_or("id", "").to_string())
