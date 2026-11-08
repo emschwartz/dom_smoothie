@@ -73,5 +73,9 @@ fn hidden_text_does_not_reach_text_content() {
             "invisible characters remain in the text"
         );
         assert!(article.content.contains("VISIBLE_xmp"));
+        assert!(
+            !article.content.chars().any(is_invisible),
+            "invisible characters remain in the content HTML"
+        );
     }
 }

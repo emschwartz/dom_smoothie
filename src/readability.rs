@@ -9,7 +9,7 @@ use crate::glob::*;
 use crate::helpers::*;
 use crate::hidden::{
     apply_stylesheet_hiding, remove_unrendered_content, strip_invisible_chars,
-    strip_invisible_chars_string,
+    strip_invisible_chars_in_tree, strip_invisible_chars_string,
 };
 use crate::is_probably_readable;
 use crate::text_helpers::format_text;
@@ -504,6 +504,7 @@ impl Readability {
         // which wasn't changed after the grabbing the article
         let base_url = self.parse_base_url();
         self.post_process_content(&root_sel, base_url);
+        strip_invisible_chars_in_tree(root_node);
 
         // If we haven't found an excerpt in the article's metadata, use the article's
         // first paragraph as the excerpt. This is used for displaying a preview of
@@ -531,7 +532,7 @@ impl Readability {
             text_content,
             length: text_length,
             excerpt: metadata.excerpt.map(strip_invisible_chars_string),
-            site_name: metadata.site_name,
+            site_name: metadata.site_name.map(strip_invisible_chars_string),
             published_time: metadata.published_time,
             modified_time: metadata.modified_time,
             image: metadata.image,

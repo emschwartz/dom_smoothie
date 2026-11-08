@@ -24,7 +24,7 @@
 //! Everything here is heuristic. It cannot see external stylesheets, computed styles,
 //! same-colored text and background, or elements covered by other elements.
 
-use dom_query::{Document, Matcher, Node};
+use dom_query::{Document, Matcher, Node, NodeData};
 use foldhash::{HashMap, HashSet};
 use phf::phf_set;
 use tendril::StrTendril;
@@ -86,7 +86,43 @@ pub(crate) fn is_probably_visible(node: &Node) -> bool {
 }
 
 fn has_text(node: &Node) -> bool {
-    node.text().chars().any(|c| !c.is_whitespace())
+    let mut stack = vec![node.clone()];
+    while let Some(current) = stack.pop() {
+        let text_has_content = current
+            .query(|tree_node| match tree_node.data {
+                NodeData::Text { ref contents } => {
+                    Some(contents.chars().any(|c| !c.is_whitespace()))
+                }
+                _ => None,
+            })
+            .flatten();
+        match text_has_content {
+            Some(true) => return true,
+            Some(false) => {}
+            None => stack.extend(current.children_it(true)),
+        }
+    }
+    false
+}
+
+/// Collects the text nodes under `root` (not including `root` itself).
+///
+/// Deliberately not `descendants_it`: in `dom_query` 0.12 that iterator does not stop at
+/// the subtree root and continues into the root's following siblings.
+fn text_nodes<'a>(root: &Node<'a>) -> Vec<Node<'a>> {
+    let mut out = vec![];
+    let mut stack: Vec<Node<'a>> = root.children_it(true).collect();
+    while let Some(current) = stack.pop() {
+        let is_text = current
+            .query(|tree_node| matches!(tree_node.data, NodeData::Text { .. }))
+            .unwrap_or(false);
+        if is_text {
+            out.push(current);
+        } else {
+            stack.extend(current.children_it(true));
+        }
+    }
+    out
 }
 
 /// How a declaration block hides an element.
@@ -336,6 +372,17 @@ fn function_args<'a>(value: &'a str, func: &str) -> Option<&'a str> {
     Some(&inner[..end])
 }
 
+/// Upper bound on the stylesheet text that is scanned; anything beyond is ignored.
+const MAX_CSS_LEN: usize = 2 * 1024 * 1024;
+/// Upper bound on the number of parsed rules.
+const MAX_RULES: usize = 20_000;
+/// Upper bound on the number of hiding selectors that are matched against the document.
+const MAX_HIDING_SELECTORS: usize = 2_000;
+/// Nesting depth of at-rules beyond which the scanner stops descending.
+const MAX_AT_RULE_DEPTH: usize = 16;
+/// Selectors are matched in batches of this size, one tree traversal per batch.
+const SELECTOR_BATCH: usize = 64;
+
 /// Scans the document's `<style>` elements for simple rules that hide their subjects
 /// (for example `.sr-only { position: absolute; clip: rect(0 0 0 0); ... }` or
 /// `#promo { display: none }`) and marks every matching element that contains text with
@@ -349,19 +396,42 @@ fn function_args<'a>(value: &'a str, func: &str) -> Option<&'a str> {
 pub(crate) fn apply_stylesheet_hiding(doc: &Document) {
     let mut css = String::new();
     for style in doc.select("style").nodes() {
+        if css.len() >= MAX_CSS_LEN {
+            break;
+        }
         css.push_str(&style.text());
         css.push('\n');
     }
     if css.is_empty() {
         return;
     }
+    if css.len() > MAX_CSS_LEN {
+        let mut cut = MAX_CSS_LEN;
+        while !css.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        css.truncate(cut);
+    }
 
-    for selector in hiding_selectors(&css) {
-        if let Ok(matcher) = Matcher::new(&selector) {
-            for node in doc.select_matcher(&matcher).nodes() {
-                if has_text(node) {
-                    node.set_attr("hidden", "");
-                }
+    let mut selectors = hiding_selectors(&css);
+    selectors.truncate(MAX_HIDING_SELECTORS);
+
+    for batch in selectors.chunks(SELECTOR_BATCH) {
+        // Selectors are validated individually so one bad apple does not spoil the batch.
+        let valid: Vec<&str> = batch
+            .iter()
+            .map(String::as_str)
+            .filter(|s| Matcher::new(s).is_ok())
+            .collect();
+        if valid.is_empty() {
+            continue;
+        }
+        let Ok(matcher) = Matcher::new(&valid.join(", ")) else {
+            continue;
+        };
+        for node in doc.select_matcher(&matcher).nodes() {
+            if has_text(node) {
+                node.set_attr("hidden", "");
             }
         }
     }
@@ -458,13 +528,19 @@ struct Rule {
 /// Flattens a stylesheet into rules, descending into at-rule blocks.
 fn collect_rules(css: &str) -> Vec<Rule> {
     let mut rules = vec![];
-    collect_rules_into(css, false, &mut rules);
+    collect_rules_into(css, false, 0, &mut rules);
     rules
 }
 
-fn collect_rules_into(css: &str, conditional: bool, rules: &mut Vec<Rule>) {
+fn collect_rules_into(css: &str, conditional: bool, depth: usize, rules: &mut Vec<Rule>) {
+    if depth > MAX_AT_RULE_DEPTH {
+        return;
+    }
     let mut rest = css;
     loop {
+        if rules.len() >= MAX_RULES {
+            return;
+        }
         let Some(open) = rest.find('{') else {
             return;
         };
@@ -480,7 +556,7 @@ fn collect_rules_into(css: &str, conditional: bool, rules: &mut Vec<Rule>) {
 
         if let Some(at_rule) = prelude.strip_prefix('@') {
             let conditional = conditional || !at_rule_applies_to_screen(at_rule);
-            collect_rules_into(body, conditional, rules);
+            collect_rules_into(body, conditional, depth + 1, rules);
             continue;
         }
 
@@ -616,6 +692,20 @@ pub(crate) fn strip_invisible_chars(text: StrTendril) -> StrTendril {
     out
 }
 
+/// Removes invisible characters (see [`is_invisible_char`]) from every text node under `root`.
+pub(crate) fn strip_invisible_chars_in_tree(root: &Node) {
+    for node in text_nodes(root) {
+        node.update(|tree_node| {
+            if let NodeData::Text { ref mut contents } = tree_node.data {
+                if contents.chars().any(is_invisible_char) {
+                    let cleaned: StrTendril = strip_invisible_chars(contents.clone());
+                    *contents = cleaned;
+                }
+            }
+        });
+    }
+}
+
 /// [`strip_invisible_chars`] for owned strings.
 pub(crate) fn strip_invisible_chars_string(text: String) -> String {
     if !text.chars().any(is_invisible_char) {
@@ -747,6 +837,25 @@ mod tests {
                 ".tiny",
             ]
         );
+    }
+
+    #[test]
+    fn deeply_nested_at_rules_do_not_overflow() {
+        let depth = 100_000;
+        let mut css = String::new();
+        for _ in 0..depth {
+            css.push_str("@media screen{");
+        }
+        css.push_str(".x{display:none}");
+        for _ in 0..depth {
+            css.push('}');
+        }
+        assert!(hiding_selectors(&css).is_empty());
+        let mut unbalanced = String::new();
+        for _ in 0..depth {
+            unbalanced.push_str("}}{{");
+        }
+        assert!(hiding_selectors(&unbalanced).is_empty());
     }
 
     #[test]
