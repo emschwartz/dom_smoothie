@@ -3,10 +3,12 @@ use dom_query::Document;
 use tendril::format_tendril;
 
 use crate::glob::*;
-use crate::helpers::is_probably_visible;
+use crate::hidden::{apply_stylesheet_hiding, is_probably_visible};
 
 /// Estimates whether the document is readable in a *quick-and-dirty* way.
 ///
+/// Elements hidden by simple `<style>` rules are marked with the `hidden` attribute
+/// as a side effect, so that they do not count towards the score.
 ///
 /// # Arguments
 ///
@@ -24,6 +26,8 @@ pub fn is_probably_readable(
 ) -> bool {
     let min_score = min_score.unwrap_or(MIN_SCORE);
     let min_content_length = min_content_length.unwrap_or(MIN_CONTENT_LENGTH);
+
+    apply_stylesheet_hiding(doc);
 
     let mut nodes = doc.select("p,pre,article").nodes().to_vec();
 

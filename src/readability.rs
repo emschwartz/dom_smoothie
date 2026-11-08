@@ -7,6 +7,10 @@ use url::Url;
 use crate::config::TextMode;
 use crate::glob::*;
 use crate::helpers::*;
+use crate::hidden::{
+    apply_stylesheet_hiding, remove_unrendered_content, strip_invisible_chars,
+    strip_invisible_chars_string,
+};
 use crate::is_probably_readable;
 use crate::text_helpers::format_text;
 use crate::Config;
@@ -212,10 +216,11 @@ impl Readability {
     /// 1. Remove empty images
     /// 2. Unwrap images inside `noscript` tags
     /// 3. Remove `script` tags
-    /// 4. Remove `style` tags
-    /// 5. Replace multiple `br` tags with a single `br` tag
-    /// 6. Replace `font` tags with `span` tags
-    /// 7. Remove comments
+    /// 4. Mark elements hidden by simple `style` rules, then remove `style` tags
+    /// 5. Remove content that browsers never render (media fallbacks, closed dialogs, ...)
+    /// 6. Replace multiple `br` tags with a single `br` tag
+    /// 7. Replace `font` tags with `span` tags
+    /// 8. Remove comments
     fn prepare(&mut self) {
         self.remove_empty_imgs();
 
@@ -224,8 +229,11 @@ impl Readability {
         // remove scripts
         self.doc.select_matcher(&MATCHER_SCRIPT).remove();
 
-        // remove styles
+        // remove styles, but first let them mark what they hide
+        apply_stylesheet_hiding(&self.doc);
         self.doc.select_matcher(&MATCHER_STYLE).remove();
+
+        remove_unrendered_content(&self.doc);
 
         // replace duplicating br elements
         self.replace_brs();
@@ -511,17 +519,18 @@ impl Readability {
             TextMode::Raw => root_node.text(),
             TextMode::Formatted => format_text(root_node),
         };
+        let text_content = strip_invisible_chars(text_content);
         let text_length = text_content.chars().count();
 
         Ok(Article {
-            title: metadata.title,
-            byline: metadata.byline,
+            title: strip_invisible_chars_string(metadata.title),
+            byline: metadata.byline.map(strip_invisible_chars_string),
             dir: metadata.dir,
             lang: metadata.lang,
             content: root_sel.html(),
             text_content,
             length: text_length,
-            excerpt: metadata.excerpt,
+            excerpt: metadata.excerpt.map(strip_invisible_chars_string),
             site_name: metadata.site_name,
             published_time: metadata.published_time,
             modified_time: metadata.modified_time,

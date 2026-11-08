@@ -12,6 +12,7 @@ use crate::grab_flags::GrabFlags;
 use crate::score::*;
 
 use crate::helpers::*;
+use crate::hidden::is_probably_visible;
 use crate::prep_article::prep_article;
 use crate::Metadata;
 use crate::Readability;
