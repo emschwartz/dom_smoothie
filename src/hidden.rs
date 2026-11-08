@@ -27,6 +27,7 @@
 use dom_query::{Document, Matcher, Node, NodeData};
 use foldhash::{HashMap, HashSet};
 use phf::phf_set;
+use std::rc::Rc;
 use tendril::StrTendril;
 
 /// Class tokens that conventionally map to a hiding rule in widespread CSS frameworks
@@ -471,7 +472,7 @@ fn hiding_selectors(css: &str) -> Vec<String> {
             order.push(&rule.selector);
             vec![]
         });
-        for (name, value) in &rule.declarations {
+        for (name, value) in rule.declarations.iter() {
             entry.retain(|(n, _)| n != name);
             entry.push((name.clone(), value.clone()));
         }
@@ -519,7 +520,8 @@ fn hiding_selectors(css: &str) -> Vec<String> {
 
 struct Rule {
     selector: String,
-    declarations: Declarations,
+    /// Shared between the selectors of one `a, b, c { ... }` block.
+    declarations: Rc<Declarations>,
     /// The rule sits inside an at-rule that does not apply to every screen reader
     /// (`@media print`, `@media (min-width: ...)`, ...).
     conditional: bool,
@@ -564,12 +566,16 @@ fn collect_rules_into(css: &str, conditional: bool, depth: usize, rules: &mut Ve
         if decls.is_empty() {
             continue;
         }
+        let decls = Rc::new(decls);
         for selector in prelude.split(',') {
+            if rules.len() >= MAX_RULES {
+                return;
+            }
             let selector = selector.trim();
             if !selector.is_empty() {
                 rules.push(Rule {
                     selector: selector.to_string(),
-                    declarations: decls.clone(),
+                    declarations: Rc::clone(&decls),
                     conditional,
                 });
             }
@@ -856,6 +862,16 @@ mod tests {
             unbalanced.push_str("}}{{");
         }
         assert!(hiding_selectors(&unbalanced).is_empty());
+    }
+
+    #[test]
+    fn rule_cap_holds_for_one_giant_selector_list() {
+        let mut css = String::new();
+        for i in 0..(MAX_RULES * 2) {
+            css.push_str(&format!(".c{i},"));
+        }
+        css.push_str(".last{display:none}");
+        assert_eq!(collect_rules(&css).len(), MAX_RULES);
     }
 
     #[test]
